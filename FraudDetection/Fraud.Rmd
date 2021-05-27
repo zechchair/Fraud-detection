@@ -1,0 +1,582 @@
+---
+title: "Fraud"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+```
+
+
+## prepare dataset
+```{r }
+library(reticulate)
+library(caTools)#call library for split data
+set.seed(123)#random seed to mix data
+library(ModelMetrics)
+options(digits=20)
+library(dplyr)  
+library(ggplot2)
+library(mltools)
+library(data.table)
+# Load CART packages
+library(rpart)
+library(rpart.plot)
+library(caret)
+#install.packages("e1071")
+library(e1071)
+library(randomForest)
+library(arules)
+library(gbm)
+set.seed(123)
+options(reticulate.repl.quiet = TRUE)
+```
+
+```{python}
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.metrics import accuracy_score
+import seaborn as sns
+from sklearn import preprocessing
+from sklearn.model_selection import train_test_split # for splitting the data into train and test samples
+from sklearn.metrics import classification_report # for model evaluation metrics
+from sklearn import tree # for decision tree models
+from IPython.display import clear_output
+```
+
+```{r import data}
+df = read.csv('G:/My Drive/statistics/data/Fraud.csv')
+```
+
+we drop payment debit cash_in (2 million of data ) to reduce the nbr of not_fraud observations and because there isn't any fraud in payment debit and cash_in
+
+```{r drop useless observations}
+df=df[ which(df$type == 'CASH_OUT' | df$type == 'TRANSFER'  ), ]
+
+```
+
+we drop also isFlaggedfraud as explained above and we delet nameOrIG AND nameDest because according to chi-squared test there is no relationship between them and fraud IV (independent variable)
+
+```{r drop useless features}
+df=subset(df, select=-c(isFlaggedFraud,nameOrig,nameDest))
+
+```
+
+```{r create dest_diff}
+df$Dest_diff=df$newbalanceDest-df$oldbalanceDest
+```
+
+make type IV as factor
+
+```{r factors}
+df$type=as.factor(df$type)
+#df$isFraud=as.factor(df$isFraud)
+```
+
+```{r str}
+str(df)
+
+```
+
+```{r discretiser}
+
+df$amount_cat=discretize(df$amount, method = "fixed", breaks = c(0,1000,10000,100000,1000000,10000000,max(df$amount)))
+'df$oldbalanceOrg_cat=discretize(df$oldbalanceOrg, method = "fixed", breaks = c(0,10,100,1000,10000,100000,1000000,10000000,max(df$oldbalanceOrg)))
+df$newbalanceOrig_cat=discretize(df$newbalanceOrig, method = "fixed", breaks = c(0,10,100,1000,10000,100000,1000000,10000000,max(df$newbalanceOrig)))
+df$oldbalanceDest_cat=discretize(df$oldbalanceDest, method = "fixed", breaks = c(0,10,100,1000,10000,100000,1000000,10000000,max(df$oldbalanceDest)))
+df$newbalanceDest_cat=discretize(df$newbalanceDest, method = "fixed", breaks = c(0,10,100,1000,10000,100000,1000000,10000000,max(df$newbalanceDest)))
+'
+df$step_cat=discretize(df$step, method = "fixed", breaks = c(1,48,96,144,192,240,288,336,384,432,480,528,576,624,672,720))
+head(df)
+
+```
+
+```{r}
+df$new=paste(df$amount_cat,df$step_cat)
+df_isFraud=df[ which(df$isFraud == 1), ]
+df_isNotFraud=df[ which(df$isFraud == 0 ), ]
+```
+
+```{r}
+my.ids <- createDataPartition(df_isNotFraud$new, p = 10000/nrow(df_isNotFraud))
+df_sub <- df_isNotFraud[as.numeric(my.ids[[1]]), ]
+nrow(df_sub)
+```
+
+```{r keep same prop}
+
+plot(prop.table(table(df_isNotFraud$step_cat))/prop.table(table(df_sub$step_cat)) )
+
+plot(prop.table(table(df_isNotFraud$amount_cat))/prop.table(table(df_sub$amount_cat)) )
+
+
+
+```
+
+```{r}
+df_small=rbind(df_sub,df_isFraud)
+df_small=df_small[order(df_small$step),]
+str(df_small)
+```
+
+```{r}
+split=sample.split(df$isFraud,SplitRatio = 0.75) 
+Train_big = subset(df, split==TRUE)#in brief it takes the subset where split is true (training set)
+Test_big = subset(df, split==FALSE)
+split=sample.split(df_small$isFraud,SplitRatio = 0.75) 
+Train_small = subset(df_small, split==TRUE)#in brief it takes the subset where split is true (training set)
+Test_small = subset(df_small, split==FALSE)
+```
+
+we will check if our split maintain the same prop
+
+```{r keep same prop}
+plot(prop.table(table(df$isFraud))/prop.table(table(Train_big$isFraud)) )
+plot(prop.table(table(df$step_cat))/prop.table(table(Train_big$step_cat)) )
+plot(prop.table(table(df$amount_cat))/prop.table(table(Train_big$amount_cat)) )
+
+plot(prop.table(table(df_small$isFraud))/prop.table(table(Train_small$isFraud)) )
+plot(prop.table(table(df_small$step_cat))/prop.table(table(Train_small$step_cat)) )
+plot(prop.table(table(df_small$amount_cat))/prop.table(table(Train_small$amount_cat)) )
+
+```
+
+we notice that effectively Train
+
+```{r drop cat features}
+Train_small = subset(Train_small ,select=-c(new,amount_cat,step_cat,Dest_diff))
+df_isFraud = subset(df_isFraud ,select=-c(new,amount_cat,step_cat,Dest_diff))
+df_isNotFraud = subset(df_isNotFraud ,select=-c(new,amount_cat,step_cat,Dest_diff))
+
+Test_small=subset(Test_small ,select=-c(new,amount_cat,step_cat,Dest_diff))
+Train_big = subset(Train_big ,select=-c(new,amount_cat,step_cat,Dest_diff))
+Test_big = subset(Test_big ,select=-c(new,amount_cat,step_cat,Dest_diff))
+df = subset(df ,select=-c(new,amount_cat,step_cat,Dest_diff))
+df_small = subset(df_small ,select=-c(amount_cat,step_cat,new,Dest_diff))
+```
+
+## logistic model
+
+```{r logistic basic model}
+model_log_small=glm(isFraud ~ ., data=Train_small,family = binomial)
+str(Train_small)
+summary(model_log_small)
+model_log_big=glm(isFraud ~ ., data=Train_big,family = binomial)
+summary(model_log_big)
+```
+
+```{r}
+predict_roc_big= predict(model_log_big,type="response")
+predict_roc_small= predict(model_log_small,type="response")
+```
+
+to determine the best threshold we will plot ROC curves as tpr in function of fpr
+
+```{r}
+library(ROCR)
+ROCRpred_big = prediction(predict_roc_big,Train_big$isFraud)
+ROCRperf_big =performance(ROCRpred_big,"tpr","fpr")
+plot(ROCRperf_big,colorize=FALSE,print.cutoffs.at=seq(0,1,0.1),text.adj=c(-0.2,1.7))#plot
+
+ROCRpred_small = prediction(predict_roc_small,Train_small$isFraud)
+ROCRperf_small =performance(ROCRpred_small,"tpr","fpr")
+plot(ROCRperf_small,colorize=TRUE,print.cutoffs.at=seq(0,1,0.1),text.adj=c(-0.2,1.7))#plot
+
+
+
+```
+
+our aim is to maximize tpr and minimize fpr so we will choose 0.63 as threshold
+
+we compute the AREA UNDER CURVE AUR gives the absolute quality of the model (100% for perfect model)
+
+```{r}
+as.numeric(performance(ROCRpred_big, "auc")@y.values)
+
+as.numeric(performance(ROCRpred_small, "auc")@y.values)
+
+```
+
+the first model (using big training set) explain more than 98% of the data (which is already big) 
+the second model explains 85.7 of data
+
+```{r}
+
+threshold=0.9
+print("big data predictions on big testing set")
+predictions= predict(model_log_big,type="response",newdata = Test_big)
+a=table(Test_big$isFraud,predictions>threshold)
+a
+sprintf("the overall accuracy is: %s  " , round((((a[4]+a[1])/(a[2]+a[4]+a[1]+a[3]))*100), digits=2))
+sprintf("the overall error is: %s  " , round((((a[3]+a[2])/(a[2]+a[4]+a[1]+a[3]))*100), digits=2))
+sprintf("the rate of detected fraud is: %s  " , round((((a[4])/(a[2]+a[4]))*100), digits=2))
+sprintf("the rate of not fraud predicted as fraud is: %s  " , round((((a[3])/(a[1]+a[3]))*100), digits=2))
+
+
+print("big data predictions on small testing set")
+predictions= predict(model_log_big,type="response",newdata = Test_small)
+a=table(Test_small$isFraud,predictions>threshold)
+a
+sprintf("the overall accuracy is: %s  " , round((((a[4]+a[1])/(a[2]+a[4]+a[1]+a[3]))*100), digits=2))
+sprintf("the overall error is: %s  " , round((((a[3]+a[2])/(a[2]+a[4]+a[1]+a[3]))*100), digits=2))
+sprintf("the rate of detected fraud is: %s  " , round((((a[4])/(a[2]+a[4]))*100), digits=2))
+sprintf("the rate of not fraud predicted as fraud is: %s  " , round((((a[3])/(a[1]+a[3]))*100), digits=2))
+
+print("small data predictions on big testing set")
+predictions= predict(model_log_small,type="response",newdata = Test_big)
+a=table(Test_big$isFraud,predictions>threshold)
+a
+sprintf("the overall accuracy is: %s  " , round((((a[4]+a[1])/(a[2]+a[4]+a[1]+a[3]))*100), digits=2))
+sprintf("the overall error is: %s  " , round((((a[3]+a[2])/(a[2]+a[4]+a[1]+a[3]))*100), digits=2))
+sprintf("the rate of detected fraud is: %s  " , round((((a[4])/(a[2]+a[4]))*100), digits=2))
+sprintf("the rate of not fraud predicted as fraud is: %s  " , round((((a[3])/(a[1]+a[3]))*100), digits=2))
+
+print("small data predictions on small testing set")
+predictions= predict(model_log_small,type="response",newdata = Test_small)
+a=table(Test_small$isFraud,predictions>threshold)
+a
+sprintf("the overall accuracy is: %s  " , round((((a[4]+a[1])/(a[2]+a[4]+a[1]+a[3]))*100), digits=2))
+sprintf("the overall error is: %s  " , round((((a[3]+a[2])/(a[2]+a[4]+a[1]+a[3]))*100), digits=2))
+sprintf("the rate of detected fraud is: %s  " , round((((a[4])/(a[2]+a[4]))*100), digits=2))
+sprintf("the rate of not fraud predicted as fraud is: %s  " , round((((a[3])/(a[1]+a[3]))*100), digits=2))
+
+print("small data predictions on golbal dataset (repetitive frauds observations)")
+predictions= predict(model_log_small,type="response",newdata = df)
+a=table(df$isFraud,predictions>threshold)
+a
+sprintf("the overall accuracy is: %s  " , round((((a[4]+a[1])/(a[2]+a[4]+a[1]+a[3]))*100), digits=2))
+sprintf("the overall error is: %s  " , round((((a[3]+a[2])/(a[2]+a[4]+a[1]+a[3]))*100), digits=2))
+sprintf("the rate of detected fraud is: %s  " , round((((a[4])/(a[2]+a[4]))*100), digits=2))
+sprintf("the rate of not fraud predicted as fraud is: %s  " , round((((a[3])/(a[1]+a[3]))*100), digits=2))
+```
+
+we notice that better accuracy either using big data test or small data test is with small data model
+
+we can assume that with this model the average of the overall accuracy (true positive / (true positives +false negative) ) is 70.5%
+
+```{python}
+r.df_fraud_train=r.df_isFraud.iloc[:int(2*len(r.df_isFraud)/3),:]  #1/3 for testing and 2/3 for training
+r.df_fraud_test=r.df_isFraud.iloc[int(2*len(r.df_isFraud)/3):,:]
+```
+
+```{r}
+big_fraud_test=rbind(df_isNotFraud,df_fraud_test)
+big_fraud_test=big_fraud_test[order(big_fraud_test$step),]
+table(big_fraud_test$isFraud)
+```
+
+```{r ,include=FALSE}
+notFraud_c=df_isNotFraud
+i=1
+data=list()
+nrow(notFraud_c)
+while (nrow(notFraud_c)>10000){
+  split=sample.split(notFraud_c$step,SplitRatio = 10000/nrow(notFraud_c)) 
+part = subset(notFraud_c, split==TRUE)#in brief it takes the subset where split is true (training set)
+notFraud_c = subset(notFraud_c, split==FALSE)
+data[[i]]=rbind(part,df_fraud_train)
+data[[i]]=data[[i]][order(data[[i]]$step),]
+
+  i=i+1
+  
+}
+test_rest=rbind(notFraud_c,df_fraud_test)
+test_rest=test_rest[order(test_rest$step),]
+
+```
+
+```{r}
+#dt=list()
+
+for (i in 0:274){
+  str=sprintf('G:/My Drive/statistics/data/sans_drop/isFraud%d.csv',i)
+  dt[[i+1]]=read.csv(str)
+
+  #str=sprintf('G:/My Drive/statistics/data/from_R/isFraud%d.csv',i)
+  #write.csv(data[[i+1]],str, row.names = FALSE)
+}
+
+#write.csv(test_rest,'G:/My Drive/statistics/data/from_R/test_rest.csv', row.names = FALSE)
+##write.csv(big_fraud_test,'G:/My Drive/statistics/data/from_R/isFraud%d.csv', row.names = FALSE)
+big_fraud_test=read.csv('G:/My Drive/statistics/data/from_R/big_fraud_test.csv')
+test_rest=read.csv('G:/My Drive/statistics/data/from_R/test_rest.csv')
+
+```
+
+
+
+```{r}
+model_log=list()
+sum_pred=0
+for (i in 1:275){
+model_log[[i]]=glm(isFraud ~ ., data=data[[i]],family = binomial)
+
+}
+for (i in 1:275){
+sum_pred=sum_pred+predict(model_log[[i]],type="response",newdata = big_fraud_test)}
+
+a=table(big_fraud_test$isFraud,(sum_pred/275)>0.9)
+a
+sprintf("the overall accuracy is: %s  " , round((((a[4]+a[1])/(a[2]+a[4]+a[1]+a[3]))*100), digits=2))
+sprintf("the overall error is: %s  " , round((((a[3]+a[2])/(a[2]+a[4]+a[1]+a[3]))*100), digits=2))
+sprintf("the rate of detected fraud is: %s  " , round((((a[4])/(a[2]+a[4]))*100), digits=2))
+sprintf("the rate of not fraud predicted as fraud is: %s  " , round((((a[3])/(a[1]+a[3]))*100), digits=2))
+
+```
+
+## decision tree
+
+```{r}
+model_tree_small = rpart(isFraud ~ .-Dest_diff, data = Train_small, method="class",cp=0.001)
+prp(model_tree_small)
+model_tree_big = rpart(isFraud ~ .-Dest_diff, data = Train_big, method="class",cp=0.1)
+prp(model_tree_big)
+```
+
+```{r}
+predict_roc_big= predict(model_tree_big,type="prob")
+predict_roc_small= predict(model_tree_small,type="prob")
+```
+
+to determine the best threshold we will plot ROC curves as tpr in function of fpr
+
+```{r}
+library(ROCR)
+ROCRpred_big = prediction(predict_roc_big[,2],Train_big$isFraud)
+ROCRperf_big =performance(ROCRpred_big,"tpr","fpr")
+plot(ROCRperf_big,colorize=TRUE,print.cutoffs.at=seq(0,1,0.1),text.adj=c(-0.2,1.7))#plot
+
+ROCRpred_small = prediction(predict_roc_small[,2],Train_small$isFraud)
+ROCRperf_small =performance(ROCRpred_small,"tpr","fpr")
+plot(ROCRperf_small,colorize=TRUE,print.cutoffs.at=seq(0,1,0.1),text.adj=c(-0.2,1.7))#plot
+
+
+
+```
+
+```{r}
+as.numeric(performance(ROCRpred_big, "auc")@y.values)
+
+as.numeric(performance(ROCRpred_small, "auc")@y.values)
+
+```
+
+the first model (using big training set) explain more than 82% of the data (which is already big) 
+the second model explains 99.5 of data
+
+```{r}
+
+threshold_tree=0.5
+print("big data predictions on big testing set")
+predictions= predict(model_tree_big,type="prob",newdata = Test_big)
+a=table(Test_big$isFraud,predictions[,2]>threshold_tree)
+a
+sprintf("the overall accuracy is: %s  " , round((((a[4]+a[1])/(a[2]+a[4]+a[1]+a[3]))*100), digits=2))
+sprintf("the overall error is: %s  " , round((((a[3]+a[2])/(a[2]+a[4]+a[1]+a[3]))*100), digits=2))
+sprintf("the rate of detected fraud is: %s  " , round((((a[4])/(a[2]+a[4]))*100), digits=2))
+sprintf("the rate of not fraud predicted as fraud is: %s  " , round((((a[3])/(a[1]+a[3]))*100), digits=2))
+
+
+print("big data predictions on small testing set")
+predictions= predict(model_tree_big,type="prob",newdata = Test_small)
+a=table(Test_small$isFraud,predictions[,2]>threshold_tree)
+a
+sprintf("the overall accuracy is: %s  " , round((((a[4]+a[1])/(a[2]+a[4]+a[1]+a[3]))*100), digits=2))
+sprintf("the overall error is: %s  " , round((((a[3]+a[2])/(a[2]+a[4]+a[1]+a[3]))*100), digits=2))
+sprintf("the rate of detected fraud is: %s  " , round((((a[4])/(a[2]+a[4]))*100), digits=2))
+sprintf("the rate of not fraud predicted as fraud is: %s  " , round((((a[3])/(a[1]+a[3]))*100), digits=2))
+
+print("small data predictions on big testing set")
+predictions= predict(model_tree_small,type="prob",newdata = Test_big)
+a=table(Test_big$isFraud,predictions[,2]>threshold_tree)
+a
+sprintf("the overall accuracy is: %s  " , round((((a[4]+a[1])/(a[2]+a[4]+a[1]+a[3]))*100), digits=2))
+sprintf("the overall error is: %s  " , round((((a[3]+a[2])/(a[2]+a[4]+a[1]+a[3]))*100), digits=2))
+sprintf("the rate of detected fraud is: %s  " , round((((a[4])/(a[2]+a[4]))*100), digits=2))
+sprintf("the rate of not fraud predicted as fraud is: %s  " , round((((a[3])/(a[1]+a[3]))*100), digits=2))
+
+print("small data predictions on small testing set")
+predictions= predict(model_tree_small,type="prob",newdata = Test_small)
+a=table(Test_small$isFraud,predictions[,2]>threshold_tree)
+a
+sprintf("the overall accuracy is: %s  " , round((((a[4]+a[1])/(a[2]+a[4]+a[1]+a[3]))*100), digits=2))
+sprintf("the overall error is: %s  " , round((((a[3]+a[2])/(a[2]+a[4]+a[1]+a[3]))*100), digits=2))
+sprintf("the rate of detected fraud is: %s  " , round((((a[4])/(a[2]+a[4]))*100), digits=2))
+sprintf("the rate of not fraud predicted as fraud is: %s  " , round((((a[3])/(a[1]+a[3]))*100), digits=2))
+
+print("small data predictions on golbal dataset (repetitive frauds observations)")
+predictions= predict(model_tree_small,type="prob",newdata = df)
+a=table(df$isFraud,predictions[,2]>threshold_tree)
+a
+sprintf("the overall accuracy is: %s  " , round((((a[4]+a[1])/(a[2]+a[4]+a[1]+a[3]))*100), digits=2))
+sprintf("the overall error is: %s  " , round((((a[3]+a[2])/(a[2]+a[4]+a[1]+a[3]))*100), digits=2))
+sprintf("the rate of detected fraud is: %s  " , round((((a[4])/(a[2]+a[4]))*100), digits=2))
+sprintf("the rate of not fraud predicted as fraud is: %s  " , round((((a[3])/(a[1]+a[3]))*100), digits=2))
+
+print("small data predictions on golbal dataset test (all not fraud with only new frauds)")
+predictions= predict(model_tree_small,type="prob",newdata = big_fraud_test)
+a=table(big_fraud_test$isFraud,predictions[,2]>threshold_tree)
+a
+sprintf("the overall accuracy is: %s  " , round((((a[4]+a[1])/(a[2]+a[4]+a[1]+a[3]))*100), digits=2))
+sprintf("the overall error is: %s  " , round((((a[3]+a[2])/(a[2]+a[4]+a[1]+a[3]))*100), digits=2))
+sprintf("the rate of detected fraud is: %s  " , round((((a[4])/(a[2]+a[4]))*100), digits=2))
+sprintf("the rate of not fraud predicted as fraud is: %s  " , round((((a[3])/(a[1]+a[3]))*100), digits=2))
+```
+
+
+
+
+```{r}
+model_tree=list()
+sum_pred=0
+for (i in 1:275){
+model_tree[[i]]=rpart(isFraud ~ ., data = data[[i]], method="class",cp=0.001)
+}
+for (i in 1:275){
+sum_pred=sum_pred+predict(model_tree[[i]],type="prob",newdata = big_fraud_test)[,2]}
+
+a=table(big_fraud_test$isFraud,(sum_pred/275)>threshold)
+a
+sprintf("the overall accuracy is: %s  " , round((((a[4]+a[1])/(a[2]+a[4]+a[1]+a[3]))*100), digits=2))
+sprintf("the overall error is: %s  " , round((((a[3]+a[2])/(a[2]+a[4]+a[1]+a[3]))*100), digits=2))
+sprintf("the rate of detected fraud is: %s  " , round((((a[4])/(a[2]+a[4]))*100), digits=2))
+sprintf("the rate of not fraud predicted as fraud is: %s  " , round((((a[3])/(a[1]+a[3]))*100), digits=2))
+
+```
+
+
+
+
+
+
+
+
+## gbm
+
+```{r}
+
+model_gauss_small=gbm(isFraud~.-Dest_diff,data=Train_small, distribution="bernoulli",n.trees =5000,interaction.depth=4,shrinkage=0.05)
+summary(model_gauss_small)
+model_gauss_big=gbm(isFraud~.-Dest_diff,data=Train_big, distribution="bernoulli",n.trees =5000,interaction.depth=4,shrinkage=0.05)
+summary(model_gauss_big)
+```
+
+
+
+
+```{r}
+predict_roc_big= predict(model_gauss_big,type="response")
+predict_roc_small= predict(model_gauss_small,type="response")
+```
+
+to determine the best threshold we will plot ROC curves as tpr in function of fpr
+
+```{r}
+library(ROCR)
+ROCRpred_big = prediction(predict_roc_big[,2],Train_big$isFraud)
+ROCRperf_big =performance(ROCRpred_big,"tpr","fpr")
+plot(ROCRperf_big,colorize=TRUE,print.cutoffs.at=seq(0,1,0.1),text.adj=c(-0.2,1.7))#plot
+
+ROCRpred_small = prediction(predict_roc_small[,2],Train_small$isFraud)
+ROCRperf_small =performance(ROCRpred_small,"tpr","fpr")
+plot(ROCRperf_small,colorize=TRUE,print.cutoffs.at=seq(0,1,0.1),text.adj=c(-0.2,1.7))#plot
+
+
+
+```
+
+
+
+
+```{r}
+as.numeric(performance(ROCRpred_big, "auc")@y.values)
+
+as.numeric(performance(ROCRpred_small, "auc")@y.values)
+
+```
+
+the first model (using big training set) explain more than 82% of the data (which is already big) 
+the second model explains 99.5 of data
+
+
+
+```{r}
+
+threshold_gbm=0.5
+print("big data predictions on big testing set")
+predictions= predict(model_gauss_big,n.trees =5000,type='response',newdata = Test_big)
+a=table(Test_big$isFraud,predictions>threshold_gbm)
+a
+sprintf("the overall accuracy is: %s  " , round((((a[4]+a[1])/(a[2]+a[4]+a[1]+a[3]))*100), digits=2))
+sprintf("the overall error is: %s  " , round((((a[3]+a[2])/(a[2]+a[4]+a[1]+a[3]))*100), digits=2))
+sprintf("the rate of detected fraud is: %s  " , round((((a[4])/(a[2]+a[4]))*100), digits=2))
+sprintf("the rate of not fraud predicted as fraud is: %s  " , round((((a[3])/(a[1]+a[3]))*100), digits=2))
+
+
+print("big data predictions on small testing set")
+predictions= predict(model_gauss_big,n.trees =5000,type='response',newdata = Test_small)
+a=table(Test_small$isFraud,predictions>threshold_gbm)
+a
+sprintf("the overall accuracy is: %s  " , round((((a[4]+a[1])/(a[2]+a[4]+a[1]+a[3]))*100), digits=2))
+sprintf("the overall error is: %s  " , round((((a[3]+a[2])/(a[2]+a[4]+a[1]+a[3]))*100), digits=2))
+sprintf("the rate of detected fraud is: %s  " , round((((a[4])/(a[2]+a[4]))*100), digits=2))
+sprintf("the rate of not fraud predicted as fraud is: %s  " , round((((a[3])/(a[1]+a[3]))*100), digits=2))
+
+print("small data predictions on big testing set")
+predictions= predict(model_gauss_small,n.trees =5000,type='response',newdata = Test_big)
+a=table(Test_big$isFraud,predictions>threshold_gbm)
+a
+sprintf("the overall accuracy is: %s  " , round((((a[4]+a[1])/(a[2]+a[4]+a[1]+a[3]))*100), digits=2))
+sprintf("the overall error is: %s  " , round((((a[3]+a[2])/(a[2]+a[4]+a[1]+a[3]))*100), digits=2))
+sprintf("the rate of detected fraud is: %s  " , round((((a[4])/(a[2]+a[4]))*100), digits=2))
+sprintf("the rate of not fraud predicted as fraud is: %s  " , round((((a[3])/(a[1]+a[3]))*100), digits=2))
+
+print("small data predictions on small testing set")
+predictions= predict(model_gauss_small,n.trees =5000,type='response',newdata = Test_small)
+a=table(Test_small$isFraud,predictions>threshold_gbm)
+a
+sprintf("the overall accuracy is: %s  " , round((((a[4]+a[1])/(a[2]+a[4]+a[1]+a[3]))*100), digits=2))
+sprintf("the overall error is: %s  " , round((((a[3]+a[2])/(a[2]+a[4]+a[1]+a[3]))*100), digits=2))
+sprintf("the rate of detected fraud is: %s  " , round((((a[4])/(a[2]+a[4]))*100), digits=2))
+sprintf("the rate of not fraud predicted as fraud is: %s  " , round((((a[3])/(a[1]+a[3]))*100), digits=2))
+
+print("small data predictions on golbal dataset (repetitive frauds observations)")
+predictions= predict(model_gauss_small,n.trees =5000,type='response',newdata = df)
+a=table(df$isFraud,predictions>threshold_gbm)
+a
+sprintf("the overall accuracy is: %s  " , round((((a[4]+a[1])/(a[2]+a[4]+a[1]+a[3]))*100), digits=2))
+sprintf("the overall error is: %s  " , round((((a[3]+a[2])/(a[2]+a[4]+a[1]+a[3]))*100), digits=2))
+sprintf("the rate of detected fraud is: %s  " , round((((a[4])/(a[2]+a[4]))*100), digits=2))
+sprintf("the rate of not fraud predicted as fraud is: %s  " , round((((a[3])/(a[1]+a[3]))*100), digits=2))
+
+print("small data predictions on golbal dataset test (all not fraud with only new frauds)")
+predictions= predict(model_gauss_small,n.trees =5000,type='response',newdata = big_fraud_test)
+a=table(big_fraud_test$isFraud,predictions>threshold_gbm)
+a
+sprintf("the overall accuracy is: %s  " , round((((a[4]+a[1])/(a[2]+a[4]+a[1]+a[3]))*100), digits=2))
+sprintf("the overall error is: %s  " , round((((a[3]+a[2])/(a[2]+a[4]+a[1]+a[3]))*100), digits=2))
+sprintf("the rate of detected fraud is: %s  " , round((((a[4])/(a[2]+a[4]))*100), digits=2))
+sprintf("the rate of not fraud predicted as fraud is: %s  " , round((((a[3])/(a[1]+a[3]))*100), digits=2))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
